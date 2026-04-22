@@ -34,7 +34,6 @@ extern "system" fn debug_callback(
     } else {
         trace!("({:?}) {}", type_, message);
     }
-
     vk::FALSE
 }
 
