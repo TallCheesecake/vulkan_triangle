@@ -9,13 +9,13 @@ use vulkanalia::loader::{LIBRARY, LibloadingLoader};
 use vulkanalia::prelude::v1_0::*;
 use vulkanalia::vk::ExtDebugUtilsExtensionInstanceCommands;
 use vulkanalia::vk::KhrSurfaceExtensionInstanceCommands;
-use vulkanalia::vk::MVK_MACOS_SURFACE_EXTENSION;
 use vulkanalia::window as vk_window;
 use winit::dpi::LogicalSize;
 use winit::event::{Event, WindowEvent};
 use winit::event_loop::EventLoop;
 use winit::window::{Window, WindowBuilder};
 //nice bool bro
+const DEVICE_EXTENSIONS: &[vk::ExtensionName] = &[vk::KHR_SWAPCHAIN_EXTENSION.name];
 extern "system" fn debug_callback(
     severity: vk::DebugUtilsMessageSeverityFlagsEXT,
     type_: vk::DebugUtilsMessageTypeFlagsEXT,
@@ -104,6 +104,28 @@ impl App {
     }
 }
 
+#[derive(Clone, Debug)]
+struct SwapchainSupport {
+    capabilities: vk::SurfaceCapabilitiesKHR,
+    formats: Vec<vk::SurfaceFormatKHR>,
+    present_modes: Vec<vk::PresentModeKHR>,
+}
+impl SwapchainSupport {
+    unsafe fn get(
+        instance: &Instance,
+        AppData: &AppData,
+        physical_device: vk::PhysicalDevice,
+    ) -> Result<Self> {
+        Ok(Self {
+            capabilities: instance
+                .get_physical_device_surface_capabilities_khr(physical_device, AppData.surface)?,
+            formats: instance
+                .get_physical_device_surface_formats_khr(physical_device, AppData.surface)?,
+            present_modes: instance
+                .get_physical_device_surface_present_modes_khr(physical_device, AppData.surface)?,
+        })
+    }
+}
 unsafe fn create_logical_device(
     entry: &Entry,
     instance: &Instance,
@@ -114,16 +136,19 @@ unsafe fn create_logical_device(
     unique_queue_indicies.insert(indicies.graphics);
     unique_queue_indicies.insert(indicies.present);
     let queue_priorities = &[1.0];
-    let queue_info = vk::DeviceQueueCreateInfo::builder()
-        .queue_family_index(indicies.graphics as u32)
-        .queue_priorities(queue_priorities)
-        .build();
+    // let queue_info = vk::DeviceQueueCreateInfo::builder()
+    //     .queue_family_index(indicies.graphics as u32)
+    //     .queue_priorities(queue_priorities)
+    //     .build();
     let layers = if VALIDATION_ENABLED {
         vec![VALIDATION_LAYER.as_ptr()]
     } else {
         vec![]
     };
-    let mut extentions = vec![];
+    let mut extentions = DEVICE_EXTENSIONS
+        .iter()
+        .map(|i| i.as_ptr())
+        .collect::<Vec<_>>();
     if cfg!(target_os = "macos") && entry.version()? >= PORTABILITY_MACOS_VERSION {
         extentions.push(vk::KHR_PORTABILITY_SUBSET_EXTENSION.name.as_ptr());
     }
@@ -171,12 +196,29 @@ unsafe fn pick_physical_device(instance: &Instance, data: &mut AppData) -> Resul
     }
     Err(anyhow!("Failed to find device"))
 }
+
+fn get_swapchain_surface_format(formats: &[vk::SurfaceFormatKHR]) -> vk::SurfaceFormatKHR {
+    formats
+        .iter()
+        .cloned()
+        .find(|i| {
+            i.format == vk::Format::B8G8R8_SRGB
+                && i.color_space == vk::ColorSpaceKHR::SRGB_NONLINEAR
+        })
+        .unwrap_or_else(|| formats[0])
+}
+
 unsafe fn check_physical_device(
     instance: &Instance,
     data: &AppData,
     physical_device: vk::PhysicalDevice,
 ) -> anyhow::Result<()> {
     QueueFamilyIndices::get(instance, data, physical_device)?;
+    let support = SwapchainSupport::get(instance, data, physical_device)?;
+    if support.present_modes.is_empty() || support.formats.is_empty() {
+        return Err(anyhow!(SuitabilityError("Your swap chain does not work")));
+    }
+    check_physical_device_extensions(&instance, physical_device)?;
     let properties = instance.get_physical_device_properties(physical_device);
     if properties.device_type != vk::PhysicalDeviceType::DISCRETE_GPU {
         return Err(anyhow!(SuitabilityError("We only support discrete GPUs")));
@@ -189,7 +231,24 @@ unsafe fn check_physical_device(
     }
     Ok(())
 }
-
+unsafe fn check_physical_device_extensions(
+    instance: &Instance,
+    physical_device: vk::PhysicalDevice,
+) -> Result<()> {
+    let extention = instance
+        .enumerate_device_extension_properties(physical_device, None)?
+        .iter()
+        .map(|e| e.extension_name)
+        .collect::<HashSet<_>>();
+    if DEVICE_EXTENSIONS.iter().all(|i| extention.contains(i)) {
+        Ok(())
+    } else {
+        error!("hello");
+        return Err(anyhow!(SuitabilityError(
+            "The device does not hvae the needed extentiosn"
+        )));
+    }
+}
 #[derive(Clone, Copy, Debug)]
 struct QueueFamilyIndices {
     graphics: u32,
