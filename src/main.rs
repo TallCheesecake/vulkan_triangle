@@ -74,6 +74,7 @@ struct App {
     data: AppData,
     device: Device,
 }
+
 impl App {
     unsafe fn create(window: &Window) -> Result<Self> {
         let loader = LibloadingLoader::new(LIBRARY)?;
@@ -184,12 +185,13 @@ struct QueueFamilyIndices {
 }
 
 impl QueueFamilyIndices {
-    unsafe fn get(
+    fn get(
         instance: &Instance,
         data: &AppData,
         physical_device: vk::PhysicalDevice,
     ) -> Result<Self> {
-        let properties = instance.get_physical_device_queue_family_properties(physical_device);
+        let properties =
+            unsafe { instance.get_physical_device_queue_family_properties(physical_device) };
         //we need at least one
         let graphics = properties
             .iter()
@@ -274,7 +276,6 @@ unsafe fn create_instace(window: &Window, entry: &Entry, data: &mut AppData) -> 
     if VALIDATION_ENABLED {
         info = info.push_next(&mut debug_info);
     }
-    //um why can we cast i8 to char ? they are different types?
     let instance = entry.create_instance(&info, None)?;
     if VALIDATION_ENABLED {
         let debug_info = vk::DebugUtilsMessengerCreateInfoEXT::builder()
