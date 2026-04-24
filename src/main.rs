@@ -1,3 +1,9 @@
+#![allow(
+    dead_code,
+    unsafe_op_in_unsafe_fn,
+    unused_variables,
+    clippy::too_many_arguments
+)]
 use anyhow::{Result, anyhow};
 use log::*;
 use std::collections::HashSet;
@@ -9,6 +15,7 @@ use vulkanalia::loader::{LIBRARY, LibloadingLoader};
 use vulkanalia::prelude::v1_0::*;
 use vulkanalia::vk::ExtDebugUtilsExtensionInstanceCommands;
 use vulkanalia::vk::KhrSurfaceExtensionInstanceCommands;
+use vulkanalia::vk::KhrSwapchainExtensionDeviceCommands;
 use vulkanalia::window as vk_window;
 use winit::dpi::LogicalSize;
 use winit::event::{Event, WindowEvent};
@@ -63,6 +70,7 @@ fn main() -> Result<()> {
             },
             _ => {}
         },
+
         _ => {}
     })?;
     Ok(())
@@ -73,7 +81,54 @@ struct App {
     data: AppData,
     device: Device,
 }
+unsafe fn create_swapchain(
+    window: &Window,
+    instance: &Instance,
+    device: &Device,
+    data: &mut AppData,
+) -> Result<()> {
+    let indices = QueueFamilyIndices::get(instance, data, data.physical_device)?;
+    let support = SwapchainSupport::get(instance, data, data.physical_device)?;
+    let surface_format = get_swapchain_surface_format(&support.formats);
+    let present_mode = get_swapchain_present_mode(&support.present_modes);
+    let extent = get_swapchain_extent(window, support.capabilities);
 
+    let mut image_count = support.capabilities.min_image_count + 1;
+    if support.capabilities.max_image_count != 0
+        && image_count > support.capabilities.max_image_count
+    {
+        image_count = support.capabilities.max_image_count;
+    }
+    let mut queue_family_indices = vec![];
+    let image_sharing_mode = if indices.graphics != indices.present {
+        queue_family_indices.push(indices.graphics);
+        queue_family_indices.push(indices.present);
+        vk::SharingMode::CONCURRENT
+    } else {
+        vk::SharingMode::EXCLUSIVE
+    };
+    //Smallest vulkan struct
+    let info = vk::SwapchainCreateInfoKHR::builder()
+        .surface(data.surface)
+        .min_image_count(image_count)
+        .image_format(surface_format.format)
+        .image_color_space(surface_format.color_space)
+        .image_extent(extent)
+        .image_array_layers(1)
+        .image_usage(vk::ImageUsageFlags::COLOR_ATTACHMENT)
+        .image_sharing_mode(image_sharing_mode)
+        .pre_transform(support.capabilities.current_transform)
+        .composite_alpha(vk::CompositeAlphaFlagsKHR::OPAQUE)
+        .present_mode(present_mode)
+        .clipped(true)
+        .queue_family_indices(&queue_family_indices)
+        .old_swapchain(vk::SwapchainKHR::null());
+    data.swapchain = device.create_swapchain_khr(&info, None)?;
+    data.swapchain_images = device.get_swapchain_images_khr(data.swapchain)?;
+    data.swapchain_format = surface_format.format;
+    data.swapchain_extent = extent;
+    Ok(())
+}
 impl App {
     unsafe fn create(window: &Window) -> Result<Self> {
         let loader = LibloadingLoader::new(LIBRARY)?;
@@ -83,6 +138,7 @@ impl App {
         data.surface = vk_window::create_surface(&instance, &window, &window)?;
         pick_physical_device(&instance, &mut data)?;
         let device = create_logical_device(&entry, &instance, &mut data)?;
+        create_swapchain(&window, &instance, &device, &mut data)?;
         Ok(Self {
             entry,
             instance,
@@ -94,6 +150,7 @@ impl App {
         Ok(())
     }
     unsafe fn destroy(&mut self) {
+        self.device.destroy_swapchain_khr(self.data.swapchain, None);
         self.device.destroy_device(None);
         if VALIDATION_ENABLED {
             self.instance
@@ -197,6 +254,31 @@ unsafe fn pick_physical_device(instance: &Instance, data: &mut AppData) -> Resul
     Err(anyhow!("Failed to find device"))
 }
 
+fn get_swapchain_extent(window: &Window, capabilities: vk::SurfaceCapabilitiesKHR) -> vk::Extent2D {
+    //Magic numbers for some reason
+    if capabilities.current_extent.width != u32::MAX {
+        capabilities.current_extent
+    } else {
+        //Set the max amount it can render to the window size
+        vk::Extent2D::builder()
+            .width(window.inner_size().width.clamp(
+                capabilities.min_image_extent.width,
+                capabilities.max_image_extent.width,
+            ))
+            .height(window.inner_size().height.clamp(
+                capabilities.min_image_extent.height,
+                capabilities.max_image_extent.height,
+            ))
+            .build()
+    }
+}
+fn get_swapchain_present_mode(present_modes: &[vk::PresentModeKHR]) -> vk::PresentModeKHR {
+    present_modes
+        .iter()
+        .cloned()
+        .find(|i| *i == vk::PresentModeKHR::MAILBOX)
+        .unwrap_or(vk::PresentModeKHR::FIFO)
+}
 fn get_swapchain_surface_format(formats: &[vk::SurfaceFormatKHR]) -> vk::SurfaceFormatKHR {
     formats
         .iter()
@@ -223,6 +305,7 @@ unsafe fn check_physical_device(
     if properties.device_type != vk::PhysicalDeviceType::DISCRETE_GPU {
         return Err(anyhow!(SuitabilityError("We only support discrete GPUs")));
     }
+
     let features = instance.get_physical_device_features(physical_device);
     if features.geometry_shader != vk::TRUE {
         return Err(anyhow!(SuitabilityError(
@@ -304,6 +387,10 @@ impl QueueFamilyIndices {
 const PORTABILITY_MACOS_VERSION: Version = Version::new(1, 3, 216);
 #[derive(Default, Debug)]
 struct AppData {
+    swapchain_format: vk::Format,
+    swapchain_extent: vk::Extent2D,
+    swapchain: vk::SwapchainKHR,
+    swapchain_images: Vec<vk::Image>,
     messenger: vk::DebugUtilsMessengerEXT,
     physical_device: vk::PhysicalDevice,
     graphics_queue: vk::Queue,
